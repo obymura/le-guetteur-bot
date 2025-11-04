@@ -24,11 +24,11 @@ class PolymarketInsiderBot(discord.Client):
         self.wallet_history: Dict[str, List[dict]] = defaultdict(list)
         self.last_check = datetime.now()
         
-        # Thresholds for insider detection
-        self.MIN_BET_SIZE = 1000  # $1k minimum (baissé pour plus d'alertes)
+        # Thresholds for insider detection (MODE TEST EXTRÊME)
+        self.MIN_BET_SIZE = 50  # $50 minimum (TRÈS BAS = beaucoup d'alertes!)
         self.PRICE_SPIKE_THRESHOLD = 0.15  # 15% price change
-        self.NEW_WALLET_DAYS = 90  # Consider wallet "new" if < 90 days (élargi)
-        self.MAX_MARKETS_TO_ANALYZE = None  # None = tous, ou nombre spécifique (ex: 200)
+        self.NEW_WALLET_DAYS = 365  # Consider wallet "new" if < 365 days (très large)
+        self.MAX_MARKETS_TO_ANALYZE = 100  # Limite à 100 pour tester rapidement
         
     async def on_ready(self):
         print(f'✅ Bot connecté en tant que {self.user}')
@@ -52,6 +52,13 @@ class PolymarketInsiderBot(discord.Client):
             description="**Will Bitcoin reach $150,000 by end of 2025?**\n\n*Ceci est une alerte de test pour vérifier le bon fonctionnement du bot*",
             color=0xFF0000,  # Rouge
             timestamp=datetime.now()
+        )
+        
+        # Action à suivre (NOUVEAU FORMAT)
+        embed.add_field(
+            name="✅ ACTION À SUIVRE",
+            value="**ACHETER YES**\n*L'insider parie sur cette issue*",
+            inline=False
         )
         
         # Lien marché
@@ -122,7 +129,7 @@ class PolymarketInsiderBot(discord.Client):
         
         # Envoyer
         try:
-            await channel.send("🚀 **Le Guetteur est maintenant en ligne!**\n✅ Surveillance des insiders activée\n⏰ Vérification toutes les 30 secondes\n💰 Seuil: $1,000+ (MODE SENSIBLE)\n🎯 Probabilité min: 20%\n\n*Voici un exemple d'alerte:*", embed=embed)
+            await channel.send("🚀 **Le Guetteur est maintenant en ligne!**\n✅ Surveillance des insiders activée\n⏰ Vérification toutes les 30 secondes\n\n🧪 **MODE TEST ACTIVÉ:**\n💰 Seuil: $50+ (très bas = beaucoup d'alertes)\n🎯 Probabilité min: 10%\n📊 Limite: 100 premiers marchés\n\n⚠️ **Tu vas recevoir BEAUCOUP d'alertes pour tester!**\n*Remonte les seuils une fois confirmé que ça marche.*\n\n*Voici un exemple d'alerte:*", embed=embed)
             print('✅ Alerte de test envoyée avec succès!')
         except Exception as e:
             print(f'❌ Erreur lors de l\'envoi du test: {e}')
@@ -131,10 +138,22 @@ class PolymarketInsiderBot(discord.Client):
     async def check_insider_activity(self):
         """Main loop to detect insider activity"""
         try:
-            print(f'🔍 [{datetime.now().strftime("%H:%M:%S")}] Checking markets...')
+            print(f'\n{"="*60}')
+            print(f'🔍 [{datetime.now().strftime("%H:%M:%S")}] DÉBUT DU SCAN')
+            print(f'{"="*60}')
+            
             async with aiohttp.ClientSession() as session:
+                # Test de connexion API
+                print(f'🌐 Test connexion API Polymarket...')
+                
                 # Get active markets
                 markets = await self.get_active_markets(session)
+                
+                if not markets:
+                    print(f'❌ ERREUR: Aucun marché récupéré! API ne répond pas.')
+                    return
+                
+                print(f'✅ API connectée avec succès!')
                 print(f'📊 Analysing {len(markets)} marchés actifs...')
                 
                 # Limiter le nombre de marchés si configuré
@@ -144,31 +163,42 @@ class PolymarketInsiderBot(discord.Client):
                     print(f'⚙️  Limite: analyse des {self.MAX_MARKETS_TO_ANALYZE} premiers marchés')
                 
                 alerts_found = 0
+                trades_analyzed = 0
+                
                 for i, market in enumerate(markets_to_scan):  # Analyser TOUS les marchés
                     market_id = market.get('condition_id')
                     if not market_id:
                         continue
                     
-                    # Afficher progression tous les 100 marchés
-                    if (i + 1) % 100 == 0:
-                        print(f'   ⏳ Progression: {i + 1}/{len(markets)} marchés analysés...')
+                    # Afficher progression tous les 20 marchés (plus fréquent pour le test)
+                    if (i + 1) % 20 == 0:
+                        print(f'   ⏳ Progression: {i + 1}/{len(markets_to_scan)} marchés | {trades_analyzed} trades analysés | {alerts_found} alertes')
                     
                     # Get recent trades for this market
                     trades = await self.get_recent_trades(session, market_id)
+                    trades_analyzed += len(trades)
                     
                     # Analyze for insider patterns
                     insider_signals = await self.analyze_trades(session, market, trades)
                     
                     if insider_signals:
                         for signal in insider_signals:
+                            print(f'🚨 ALERTE TROUVÉE: {market.get("question", "N/A")[:50]}... (Prob: {signal["score"]["probability"]}%)')
                             await self.send_insider_alert(signal)
                             alerts_found += 1
                             await asyncio.sleep(2)  # Rate limiting
                 
-                print(f'✅ Check terminé: {alerts_found} alerte(s) trouvée(s)')
+                print(f'\n{"="*60}')
+                print(f'✅ SCAN TERMINÉ')
+                print(f'   📊 Marchés analysés: {len(markets_to_scan)}')
+                print(f'   💰 Trades analysés: {trades_analyzed}')
+                print(f'   🚨 Alertes envoyées: {alerts_found}')
+                print(f'{"="*60}\n')
                 
         except Exception as e:
             print(f'❌ Erreur dans check_insider_activity: {e}')
+            import traceback
+            traceback.print_exc()
     
     async def get_active_markets(self, session: aiohttp.ClientSession) -> List[dict]:
         """Fetch ALL active markets from Polymarket using pagination"""
@@ -298,7 +328,7 @@ class PolymarketInsiderBot(discord.Client):
                 data['trades']
             )
             
-            if score['probability'] > 20:  # More than 20% chance of insider (baissé pour plus d'alertes)
+            if score['probability'] > 10:  # MODE TEST: accepte même 10% (tu vas avoir PLEIN d'alertes!)
                 insider_signals.append({
                     'market': market,
                     'wallet': wallet,
@@ -391,6 +421,18 @@ class PolymarketInsiderBot(discord.Client):
             timestamp=signal['timestamp']
         )
         
+        # Action Summary (nouveau - en haut pour clarté)
+        side = signal['trades'][0].get('side', 'N/A')
+        outcome = signal['trades'][0].get('outcome', 'N/A')
+        action_emoji = "✅" if side.upper() == "BUY" else "❌"
+        action_text = "ACHETER" if side.upper() == "BUY" else "VENDRE"
+        
+        embed.add_field(
+            name=f"{action_emoji} ACTION À SUIVRE",
+            value=f"**{action_text} {outcome}**\n*L'insider parie sur cette issue*",
+            inline=False
+        )
+        
         # Market info
         market_slug = market.get('slug', '')
         market_url = f"https://polymarket.com/event/{market_slug}" if market_slug else "N/A"
@@ -410,20 +452,34 @@ class PolymarketInsiderBot(discord.Client):
         )
         
         # Trading recommendation
-        outcome = signal['trades'][0].get('outcome', 'N/A')
         side = signal['trades'][0].get('side', 'N/A')
-        recommendation = "YES ✅" if side == "BUY" else "NO ❌"
+        outcome = signal['trades'][0].get('outcome', 'N/A')
+        
+        # Déterminer la recommandation basée sur le side du trade
+        if side.upper() == "BUY":
+            recommendation = f"YES ✅ (l'insider achète {outcome})"
+        elif side.upper() == "SELL":
+            recommendation = f"NO ❌ (l'insider vend {outcome})"
+        else:
+            recommendation = f"{side} sur {outcome}"
         
         embed.add_field(
-            name="💡 Recommandation",
-            value=f"**Suivre l'insider:** {recommendation}",
-            inline=True
+            name="💡 Détails du Trade",
+            value=f"**Type:** {action_text} (side={side})\n**Outcome:** {outcome}",
+            inline=False
         )
         
-        # Bet size
+        # Bet size and price
+        trade_price = float(signal['trades'][0].get('price', 0))
         embed.add_field(
             name="💰 Taille du pari",
             value=f"**${signal['bet_size']:,.0f}**",
+            inline=True
+        )
+        
+        embed.add_field(
+            name="💵 Prix du trade",
+            value=f"**${trade_price:.3f}** par share",
             inline=True
         )
         
