@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
-🚀 POLYMARKET INSIDER BOT - PRODUCTION READY
-Basé sur la documentation officielle Polymarket
-Détecte les insiders avec scoring strict
+🚀 POLYMARKET INSIDER BOT - WITH ULTRA-DETAILED LOGGING
+Shows EXACTLY what happens with each trade
 """
 
 import discord
@@ -10,7 +9,7 @@ from discord.ext import commands, tasks
 import aiohttp
 import os
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Dict, List, Optional
 
 # CONFIG
@@ -18,366 +17,242 @@ TOKEN = os.getenv("DISCORD_BOT_TOKEN") or os.getenv("DISCORD_TOKEN")
 CHANNEL = int(os.getenv("DISCORD_CHANNEL_ID") or os.getenv("CHANNEL_ID", "0"))
 
 if not TOKEN or CHANNEL == 0:
-    print("❌ DISCORD_BOT_TOKEN or CHANNEL_ID missing!")
+    print("❌ Missing TOKEN or CHANNEL!")
     sys.exit(1)
 
-print(f"✅ Config OK - Channel: {CHANNEL}")
+print(f"✅ Config: Channel={CHANNEL}")
 
-# ENDPOINTS (from official Polymarket docs)
-DATA_API = "https://data-api.polymarket.com"  # Get trades & wallet activity
-CLOB_API = "https://clob.polymarket.com"      # Order book & pricing
+DATA_API = "https://data-api.polymarket.com"
 
-# INSIDER DETECTION SETTINGS
-MIN_TRADE_SIZE = 10000           # $10K minimum
-MIN_WALLET_AGE_HOURS = -24       # Wallet created < 24h ago = new
-MAX_WALLET_TRADES = 5            # Fewer trades = more suspicious
-MIN_ALERT_SCORE = 80             # 80%+ confidence threshold
-
-class InsiderDetectorBot(commands.Cog):
+class DebugInsiderBot(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.session: Optional[aiohttp.ClientSession] = None
-        self.processed_trades = set()
-        self.alerts_count = 0
+        self.session = None
+        self.processed = set()
+        self.alerts = 0
+        self.scan_count = 0
         
     async def cog_load(self):
-        """Initialize the bot"""
         self.session = aiohttp.ClientSession()
-        if not self.scanner.is_running():
-            self.scanner.start()
-        print("✅ Insider detector loaded")
+        if not self.scan.is_running():
+            self.scan.start()
+        print("✅ Bot loaded")
         
     async def cog_unload(self):
-        """Cleanup"""
-        self.scanner.cancel()
+        self.scan.cancel()
         if self.session:
             await self.session.close()
 
-    # ============================================================
-    # API METHODS (based on official Polymarket docs)
-    # ============================================================
-
-    async def fetch_recent_trades(self, limit: int = 1000) -> List[Dict]:
-        """
-        Fetch recent trades from Data-API
-        Endpoint: GET /trades
-        Returns list of trades with fields: proxyWallet, timestamp, size, price, etc.
-        """
+    async def get_trades(self) -> list:
+        """Get trades with detailed logging"""
         try:
             url = f"{DATA_API}/trades"
-            params = {"limit": limit}
+            params = {"limit": 100}  # Smaller limit for debugging
             
-            async with self.session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=20)) as resp:
-                if resp.status == 200:
-                    trades = await resp.json()
-                    if isinstance(trades, list):
-                        return trades
-                    elif isinstance(trades, dict) and "trades" in trades:
-                        return trades["trades"]
-                    return trades if isinstance(trades, list) else []
-        except Exception as e:
-            print(f"❌ fetch_recent_trades error: {e}")
-        return []
-
-    async def fetch_wallet_activity(self, wallet: str) -> List[Dict]:
-        """
-        Fetch wallet activity/history from Data-API
-        Endpoint: GET /activity?proxyWallet={wallet}
-        Returns all trades from this wallet
-        """
-        try:
-            url = f"{DATA_API}/activity"
-            params = {"proxyWallet": wallet}
+            print(f"🔗 API Call: GET {url}?limit=100")
             
-            async with self.session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=20)) as resp:
+            async with self.session.get(url, params=params, timeout=20) as resp:
+                print(f"   Status: {resp.status}")
+                
                 if resp.status == 200:
-                    activity = await resp.json()
-                    if isinstance(activity, list):
-                        return activity
+                    data = await resp.json()
+                    print(f"   Response type: {type(data)}")
+                    
+                    if isinstance(data, list):
+                        print(f"   ✅ Got {len(data)} trades (list)")
+                        
+                        # Log first trade structure
+                        if len(data) > 0:
+                            first = data[0]
+                            print(f"   First trade keys: {list(first.keys())}")
+                        
+                        return data
+                    else:
+                        print(f"   ❌ Not a list! Type: {type(data)}")
+                        if isinstance(data, dict):
+                            print(f"   Keys: {list(data.keys())}")
+                        return []
+                else:
+                    text = await resp.text()
+                    print(f"   ❌ Error: {text[:200]}")
                     return []
+                    
         except Exception as e:
-            print(f"⚠️ fetch_wallet_activity ({wallet[:8]}): {e}")
-        return []
+            print(f"❌ Exception: {e}")
+            return []
 
-    # ============================================================
-    # INSIDER SCORING LOGIC
-    # ============================================================
-
-    async def detect_insider(self, trade: Dict) -> tuple[int, List[str]]:
-        """
-        Detect if a trade is from an insider
-        Returns: (score 0-100, list of signals)
-        """
+    async def analyze_trade(self, trade: Dict) -> tuple:
+        """Analyze trade with ULTRA detailed logging"""
+        
+        wallet = trade.get("proxyWallet", "N/A")
+        timestamp = trade.get("timestamp", "N/A")
+        size = trade.get("size", "N/A")
+        usdc = trade.get("usdcSize", "N/A")
+        price = trade.get("price", "N/A")
+        outcome = trade.get("outcome", "N/A")
+        title = trade.get("title", "N/A")[:40]
+        side = trade.get("side", "N/A")
+        
+        print(f"   📊 Trade: {title}")
+        print(f"      Wallet: {wallet[:10]}...")
+        print(f"      Size: {size} | USDC: {usdc} | Price: {price}")
+        print(f"      Outcome: {outcome} | Side: {side}")
+        
         score = 0
         signals = []
-
+        
+        # Convert to float for comparison
         try:
-            # Extract trade data (from official response schema)
-            wallet = trade.get("proxyWallet", "")
-            timestamp = trade.get("timestamp", 0)  # Unix timestamp
-            size = float(trade.get("size", 0))
-            usdc_size = float(trade.get("usdcSize", 0)) or (size * float(trade.get("price", 0)))
-            price = float(trade.get("price", 0))
-            outcome = trade.get("outcome", "")
-            title = trade.get("title", "Unknown")[:50]
-            side = trade.get("side", "")
-
-            # ===== CHECK 1: TRADE SIZE (max 35pts) =====
-            if usdc_size < MIN_TRADE_SIZE:
-                return 0, []  # Too small, skip
+            usdc_val = float(usdc) if usdc != "N/A" else 0
+            price_val = float(price) if price != "N/A" else 0.5
             
-            if usdc_size >= 50000:
-                score += 35
-                signals.append(f"💰 MEGA TRADE: ${usdc_size:,.0f}")
-            elif usdc_size >= 20000:
-                score += 28
-                signals.append(f"💰 Large: ${usdc_size:,.0f}")
-            elif usdc_size >= 10000:
-                score += 20
-                signals.append(f"💰 Substantial: ${usdc_size:,.0f}")
-
-            # ===== CHECK 2: WALLET AGE (max 30pts) =====
-            # Get wallet history
-            wallet_trades = await self.fetch_wallet_activity(wallet)
-            num_trades = len(wallet_trades)
-            
-            # Find first trade timestamp
-            first_trade_ts = None
-            if wallet_trades and len(wallet_trades) > 0:
-                first_trade_ts = min(t.get("timestamp", 0) for t in wallet_trades)
-            
-            # If wallet very new
-            if num_trades <= 2:
-                score += 30
-                if num_trades == 1:
-                    signals.append(f"🆕 FIRST TRADE EVER (wallet age: <1h)")
-                else:
-                    signals.append(f"🆕 Wallet quasi-new ({num_trades} trades)")
-            elif num_trades > 50:
-                score -= 25  # Old wallet, not suspicious
+            # Check 1: Size
+            print(f"      Check 1 - Size: ${usdc_val:,.0f}", end="")
+            if usdc_val < 10000:
+                print(" ❌ (< $10K)")
                 return 0, []
-
-            # ===== CHECK 3: PRICE EXTREMES (max 25pts) =====
-            # Odds < 10% or > 90% = very suspicious
-            if price < 0.05 or price > 0.95:
-                score += 25
-                signals.append(f"🚨 EXTREME ODDS: {price:.1%}")
-            elif price < 0.10 or price > 0.90:
-                score += 18
-                signals.append(f"⚠️ Very extreme: {price:.1%}")
-            elif price < 0.15 or price > 0.85:
-                score += 10
-                signals.append(f"📊 Unusual odds: {price:.1%}")
-
-            # ===== CHECK 4: TIMING (max 10pts) =====
-            # Recent trades = more suspicious
-            if timestamp:
-                try:
-                    trade_time = datetime.fromtimestamp(timestamp)
-                    now = datetime.now()
-                    hours_ago = (now - trade_time).total_seconds() / 3600
-                    
-                    if hours_ago < 1:
-                        score += 10
-                        signals.append(f"⏰ VERY RECENT: {hours_ago:.0f}min ago")
-                    elif hours_ago < 5:
-                        score += 8
-                        signals.append(f"⏰ Recent: {hours_ago:.1f}h ago")
-                    
-                    # Late night trades (2-5am) = suspicious
-                    hour = trade_time.hour
-                    if 2 <= hour <= 5:
-                        score += 8
-                        signals.append(f"🌙 Late night trade ({hour}:00 UTC)")
-                except:
-                    pass
-
-            # ===== CHECK 5: CONCENTRATION (max 10pts) =====
-            unique_markets = len(set(t.get("conditionId") for t in wallet_trades if t.get("conditionId")))
+            elif usdc_val >= 50000:
+                score += 35
+                signals.append(f"💰 ${usdc_val:,.0f}")
+                print(f" ✅ +35 pts (${usdc_val:,.0f})")
+            elif usdc_val >= 10000:
+                score += 20
+                signals.append(f"💰 ${usdc_val:,.0f}")
+                print(f" ✅ +20 pts (${usdc_val:,.0f})")
             
-            if unique_markets <= 1:
-                score += 10
-                signals.append("🎯 100% concentrated on 1 market")
-            elif unique_markets <= 3:
-                score += 5
-                signals.append(f"🎯 Concentrated: {unique_markets} markets")
-
+            # Check 2: Price
+            print(f"      Check 2 - Price: {price_val:.1%}", end="")
+            if price_val < 0.05 or price_val > 0.95:
+                score += 25
+                signals.append(f"🚨 {price_val:.1%}")
+                print(f" ✅ +25 pts (extreme)")
+            elif price_val < 0.10 or price_val > 0.90:
+                score += 18
+                signals.append(f"⚠️ {price_val:.1%}")
+                print(f" ✅ +18 pts (very high/low)")
+            else:
+                print(f" ⚠️ 0 pts (normal)")
+            
+            # Final score
+            final = min(100, score)
+            print(f"      FINAL SCORE: {final}%", end="")
+            
+            if final >= 80:
+                print(" ✅ ALERT!")
+                return final, signals
+            else:
+                print(" ❌ Too low")
+                return 0, []
+                
         except Exception as e:
-            print(f"❌ detect_insider error: {e}")
+            print(f"      ❌ Error parsing: {e}")
             return 0, []
 
-        # Normalize score
-        final_score = min(100, max(0, score))
-        return final_score, signals
-
-    # ============================================================
-    # MAIN SCANNER LOOP
-    # ============================================================
-
-    @tasks.loop(seconds=60)
-    async def scanner(self):
-        """Main scanner: runs every 60 seconds"""
-        try:
-            print(f"\n🔍 [{datetime.now().strftime('%H:%M:%S')}] INSIDER SCAN...")
-            
-            # Fetch recent trades
-            trades = await self.fetch_recent_trades(limit=1000)
-            
-            if not trades:
-                print("⚠️ No trades fetched")
-                return
-            
-            print(f"📊 {len(trades)} trades to analyze")
-            
-            alerts_this_scan = 0
-            
-            for trade in trades:
-                try:
-                    # Skip if already processed
-                    trade_id = f"{trade.get('proxyWallet')}-{trade.get('timestamp')}"
-                    if trade_id in self.processed_trades:
-                        continue
-                    
-                    self.processed_trades.add(trade_id)
-                    if len(self.processed_trades) > 5000:
-                        self.processed_trades = set(list(self.processed_trades)[-2000:])
-                    
-                    # Detect insider
-                    score, signals = await self.detect_insider(trade)
-                    
-                    # Send alert if high score
-                    if score >= MIN_ALERT_SCORE and signals:
-                        await self.send_alert_discord(trade, score, signals)
-                        alerts_this_scan += 1
-                        self.alerts_count += 1
-                        
-                except Exception as e:
-                    print(f"⚠️ Trade error: {e}")
+    @tasks.loop(seconds=120)  # Longer interval for debugging
+    async def scan(self):
+        """Main scan with detailed logging"""
+        self.scan_count += 1
+        
+        print(f"\n{'='*80}")
+        print(f"🔍 SCAN #{self.scan_count} - [{datetime.now().strftime('%H:%M:%S')}]")
+        print(f"{'='*80}")
+        
+        trades = await self.get_trades()
+        
+        if not trades:
+            print("❌ No trades fetched!\n")
+            return
+        
+        print(f"\n📊 Analyzing {len(trades)} trades...")
+        print()
+        
+        alerts = 0
+        analyzed = 0
+        
+        for i, trade in enumerate(trades[:20]):  # Only first 20 for debugging
+            try:
+                trade_id = f"{trade.get('proxyWallet')}-{trade.get('timestamp')}"
+                
+                if trade_id in self.processed:
+                    print(f"   Trade {i+1}: SKIP (already seen)")
                     continue
-            
-            print(f"✅ Scan done - {alerts_this_scan} alerts")
-            print(f"   Total today: {self.alerts_count}")
-            
-        except Exception as e:
-            print(f"❌ Scanner error: {e}")
+                
+                self.processed.add(trade_id)
+                
+                print(f"   Trade {i+1}/{min(20, len(trades))}:")
+                score, signals = await self.analyze_trade(trade)
+                
+                if score >= 80:
+                    print(f"      → SENDING ALERT!\n")
+                    await self.send_alert(trade, score, signals)
+                    alerts += 1
+                    self.alerts += 1
+                else:
+                    print()
+                
+                analyzed += 1
+                
+            except Exception as e:
+                print(f"   Trade {i+1}: ERROR - {e}\n")
+                continue
+        
+        print(f"{'='*80}")
+        print(f"✅ Scan complete")
+        print(f"   Trades analyzed: {analyzed}")
+        print(f"   Alerts sent: {alerts}")
+        print(f"   Total alerts today: {self.alerts}")
+        print(f"{'='*80}\n")
 
-    # ============================================================
-    # DISCORD ALERTS
-    # ============================================================
-
-    async def send_alert_discord(self, trade: Dict, score: int, signals: List[str]):
-        """Send alert to Discord"""
+    async def send_alert(self, trade: Dict, score: int, signals: List[str]):
+        """Send Discord alert"""
         try:
             channel = self.bot.get_channel(CHANNEL)
             if not channel:
-                print(f"❌ Channel {CHANNEL} not found!")
+                print(f"❌ Channel not found!")
                 return
             
-            # Extract data
-            wallet = trade.get("proxyWallet", "unknown")[:10]
-            title = trade.get("title", "Unknown")[:70]
+            title = trade.get("title", "Unknown")[:60]
             outcome = trade.get("outcome", "?")
-            side = trade.get("side", "?")
-            price = float(trade.get("price", 0))
-            size = float(trade.get("size", 0))
-            usdc = float(trade.get("usdcSize", 0)) or (size * price)
-            slug = trade.get("slug", "")
+            usdc = trade.get("usdcSize", 0)
+            price = trade.get("price", 0)
+            wallet = trade.get("proxyWallet", "unknown")[:10]
             
-            url = f"https://polymarket.com/market/{slug}" if slug else "https://polymarket.com"
-            
-            # Color by confidence
-            if score >= 90:
-                color = discord.Color.dark_red()
-                emoji = "🚨🚨🚨"
-            elif score >= 85:
-                color = discord.Color.red()
-                emoji = "🚨"
-            else:
-                color = discord.Color.orange()
-                emoji = "⚠️"
-            
-            # Build embed
             embed = discord.Embed(
-                title=f"{emoji} INSIDER DETECTED - {score}%",
+                title=f"🚨 INSIDER - {score}%",
                 description=f"**{title}**\n→ {outcome}",
-                color=color,
-                url=url,
-                timestamp=datetime.now()
+                color=discord.Color.red()
             )
             
-            embed.add_field(
-                name="💰 Trade Size",
-                value=f"${usdc:,.0f}",
-                inline=True
-            )
-            
-            embed.add_field(
-                name="📊 Odds",
-                value=f"{price:.2%}",
-                inline=True
-            )
-            
-            embed.add_field(
-                name="👤 Wallet",
-                value=f"`{wallet}...`",
-                inline=True
-            )
+            embed.add_field(name="💰", value=f"${usdc:,.0f}", inline=True)
+            embed.add_field(name="📊", value=f"{price:.2%}", inline=True)
+            embed.add_field(name="👤", value=f"`{wallet}...`", inline=True)
             
             if signals:
-                embed.add_field(
-                    name="🔍 Signals",
-                    value="\n".join(f"• {s}" for s in signals[:5]),
-                    inline=False
-                )
-            
-            embed.set_footer(text=f"Confidence: {score}% | {datetime.now().strftime('%H:%M:%S UTC')}")
+                embed.add_field(name="🔍", value="\n".join(f"• {s}" for s in signals), inline=False)
             
             await channel.send(embed=embed)
-            print(f"✅ INSIDER ALERT: {title[:30]} ({score}%)")
+            print(f"✅ Alert sent to Discord!")
             
         except Exception as e:
-            print(f"❌ Discord alert error: {e}")
+            print(f"❌ Discord error: {e}")
 
-    @scanner.before_loop
-    async def before_scanner(self):
-        """Wait for bot to be ready"""
+    @scan.before_loop
+    async def before_scan(self):
         await self.bot.wait_until_ready()
         print("✅ Scanner ready!")
 
-# ============================================================
-# BOT SETUP
-# ============================================================
+# BOT
+intents = discord.Intents.default()
+bot = commands.Bot(command_prefix="!", intents=intents)
 
-def create_bot():
-    intents = discord.Intents.default()
-    intents.message_content = True
-    bot = commands.Bot(command_prefix="!", intents=intents)
-    
-    @bot.event
-    async def on_ready():
-        print(f"\n{'='*60}")
-        print(f"✅ BOT CONNECTED: {bot.user}")
-        print(f"{'='*60}\n")
-        
-        if not bot.cogs.get('InsiderDetectorBot'):
-            cog = InsiderDetectorBot(bot)
-            await cog.cog_load()
-            await bot.add_cog(cog)
-    
-    return bot
-
-# ============================================================
-# MAIN
-# ============================================================
+@bot.event
+async def on_ready():
+    print(f"\n✅ BOT: {bot.user}\n")
+    if not bot.cogs.get('DebugInsiderBot'):
+        cog = DebugInsiderBot(bot)
+        await cog.cog_load()
+        await bot.add_cog(cog)
 
 if __name__ == "__main__":
-    print("\n" + "="*60)
-    print("🚀 POLYMARKET INSIDER DETECTOR")
-    print("="*60)
-    print(f"⚙️  Min trade: ${MIN_TRADE_SIZE:,}")
-    print(f"⚙️  Min score: {MIN_ALERT_SCORE}%")
-    print(f"⚙️  Max wallet trades: {MAX_WALLET_TRADES}")
-    print("="*60 + "\n")
-    
-    bot = create_bot()
+    print("\n🚀 POLYMARKET INSIDER BOT - DEBUG MODE\n")
     bot.run(TOKEN)
