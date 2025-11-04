@@ -32,7 +32,99 @@ class PolymarketInsiderBot(discord.Client):
     async def on_ready(self):
         print(f'✅ Bot connecté en tant que {self.user}')
         print(f'📊 Surveillance des insiders Polymarket activée')
+        
+        # ENVOYER UN MESSAGE DE TEST AU DÉMARRAGE
+        await self.send_test_alert()
+        
         self.check_insider_activity.start()
+    
+    async def send_test_alert(self):
+        """Envoie une alerte de test au démarrage pour vérifier que tout fonctionne"""
+        channel = self.get_channel(self.channel_id)
+        if not channel:
+            print(f'❌ Channel {self.channel_id} non trouvé pour le test')
+            return
+        
+        # Créer l'embed de test
+        embed = discord.Embed(
+            title="🧪 TEST - ALERTE INSIDER DÉTECTÉ",
+            description="**Will Bitcoin reach $150,000 by end of 2025?**\n\n*Ceci est une alerte de test pour vérifier le bon fonctionnement du bot*",
+            color=0xFF0000,  # Rouge
+            timestamp=datetime.now()
+        )
+        
+        # Lien marché
+        embed.add_field(
+            name="📊 Marché",
+            value="[Voir sur Polymarket](https://polymarket.com/event/will-bitcoin-reach-150k)",
+            inline=False
+        )
+        
+        # Jauge de probabilité
+        probability = 87
+        gauge = "█" * 8 + "░" * 2
+        embed.add_field(
+            name=f"🎲 Probabilité Insider: **{probability}%**",
+            value=f"{gauge} 🔥 **TRÈS ÉLEVÉE**",
+            inline=False
+        )
+        
+        # Recommandation et taille
+        embed.add_field(
+            name="💡 Recommandation",
+            value="**Suivre l'insider:** YES ✅",
+            inline=True
+        )
+        
+        embed.add_field(
+            name="💰 Taille du pari",
+            value="**$47,500**",
+            inline=True
+        )
+        
+        # Info wallet
+        embed.add_field(
+            name="👤 Wallet",
+            value="`0x1a2b3c...def456`",
+            inline=True
+        )
+        
+        embed.add_field(
+            name="📝 Premier trade?",
+            value="✅ **OUI**",
+            inline=True
+        )
+        
+        # Timestamp
+        embed.add_field(
+            name="⏰ Heure du trade",
+            value="2025-11-04T02:15:33Z",
+            inline=True
+        )
+        
+        # Raisons
+        reasons = "\n".join([
+            "• 🆕 Wallet créé spécifiquement pour ce trade",
+            "• 💰 Mise massive ($47,500)",
+            "• 🎯 100% focus sur ce marché uniquement",
+            "• ⏰ Trade à 2h (heures suspectes)"
+        ])
+        
+        embed.add_field(
+            name="🔍 Signaux détectés",
+            value=reasons,
+            inline=False
+        )
+        
+        # Footer
+        embed.set_footer(text="🧪 ALERTE DE TEST • Polymarket Insider Detector")
+        
+        # Envoyer
+        try:
+            await channel.send("🚀 **Le Guetteur est maintenant en ligne!**\n✅ Surveillance des insiders activée\n⏰ Vérification toutes les 5 minutes\n💰 Seuil: $5,000+\n\n*Voici un exemple d'alerte:*", embed=embed)
+            print('✅ Alerte de test envoyée avec succès!')
+        except Exception as e:
+            print(f'❌ Erreur lors de l\'envoi du test: {e}')
     
     @tasks.loop(minutes=5)  # Check every 5 minutes
     async def check_insider_activity(self):
