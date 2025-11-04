@@ -25,9 +25,9 @@ class PolymarketInsiderBot(discord.Client):
         self.last_check = datetime.now()
         
         # Thresholds for insider detection
-        self.MIN_BET_SIZE = 5000  # $5k minimum
+        self.MIN_BET_SIZE = 1000  # $1k minimum (baissé pour plus d'alertes)
         self.PRICE_SPIKE_THRESHOLD = 0.15  # 15% price change
-        self.NEW_WALLET_DAYS = 30  # Consider wallet "new" if < 30 days
+        self.NEW_WALLET_DAYS = 90  # Consider wallet "new" if < 90 days (élargi)
         
     async def on_ready(self):
         print(f'✅ Bot connecté en tant que {self.user}')
@@ -121,19 +121,22 @@ class PolymarketInsiderBot(discord.Client):
         
         # Envoyer
         try:
-            await channel.send("🚀 **Le Guetteur est maintenant en ligne!**\n✅ Surveillance des insiders activée\n⏰ Vérification toutes les 5 minutes\n💰 Seuil: $5,000+\n\n*Voici un exemple d'alerte:*", embed=embed)
+            await channel.send("🚀 **Le Guetteur est maintenant en ligne!**\n✅ Surveillance des insiders activée\n⏰ Vérification toutes les 30 secondes\n💰 Seuil: $1,000+ (MODE SENSIBLE)\n🎯 Probabilité min: 20%\n\n*Voici un exemple d'alerte:*", embed=embed)
             print('✅ Alerte de test envoyée avec succès!')
         except Exception as e:
             print(f'❌ Erreur lors de l\'envoi du test: {e}')
     
-    @tasks.loop(minutes=5)  # Check every 5 minutes
+    @tasks.loop(seconds=30)  # Check every 30 seconds
     async def check_insider_activity(self):
         """Main loop to detect insider activity"""
         try:
+            print(f'🔍 [{datetime.now().strftime("%H:%M:%S")}] Checking markets...')
             async with aiohttp.ClientSession() as session:
                 # Get active markets
                 markets = await self.get_active_markets(session)
+                print(f'📊 Found {len(markets)} markets')
                 
+                alerts_found = 0
                 for market in markets[:50]:  # Monitor top 50 markets
                     market_id = market.get('condition_id')
                     if not market_id:
@@ -148,7 +151,10 @@ class PolymarketInsiderBot(discord.Client):
                     if insider_signals:
                         for signal in insider_signals:
                             await self.send_insider_alert(signal)
+                            alerts_found += 1
                             await asyncio.sleep(2)  # Rate limiting
+                
+                print(f'✅ Check terminé: {alerts_found} alerte(s) trouvée(s)')
                 
         except Exception as e:
             print(f'❌ Erreur dans check_insider_activity: {e}')
@@ -259,7 +265,7 @@ class PolymarketInsiderBot(discord.Client):
                 data['trades']
             )
             
-            if score['probability'] > 50:  # More than 50% chance of insider
+            if score['probability'] > 20:  # More than 20% chance of insider (baissé pour plus d'alertes)
                 insider_signals.append({
                     'market': market,
                     'wallet': wallet,
@@ -447,8 +453,10 @@ class PolymarketInsiderBot(discord.Client):
             return 0xFF6600  # Orange - High
         elif probability >= 50:
             return 0xFFCC00  # Yellow - Medium
+        elif probability >= 20:
+            return 0x00BFFF  # Blue - Low but notable
         else:
-            return 0x808080  # Gray - Low
+            return 0x808080  # Gray - Very low
     
     def create_probability_gauge(self, probability: int) -> str:
         """Create visual probability gauge"""
@@ -462,8 +470,10 @@ class PolymarketInsiderBot(discord.Client):
             return f"{gauge} ⚠️ **ÉLEVÉE**"
         elif probability >= 50:
             return f"{gauge} ⚡ **MOYENNE**"
+        elif probability >= 20:
+            return f"{gauge} 💡 **FAIBLE**"
         else:
-            return f"{gauge} ℹ️ **FAIBLE**"
+            return f"{gauge} ℹ️ **TRÈS FAIBLE**"
 
 
 def main():
