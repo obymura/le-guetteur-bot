@@ -28,6 +28,7 @@ class PolymarketInsiderBot(discord.Client):
         self.MIN_BET_SIZE = 1000  # $1k minimum (baissé pour plus d'alertes)
         self.PRICE_SPIKE_THRESHOLD = 0.15  # 15% price change
         self.NEW_WALLET_DAYS = 90  # Consider wallet "new" if < 90 days (élargi)
+        self.MAX_MARKETS_TO_ANALYZE = None  # None = tous, ou nombre spécifique (ex: 200)
         
     async def on_ready(self):
         print(f'✅ Bot connecté en tant que {self.user}')
@@ -134,13 +135,23 @@ class PolymarketInsiderBot(discord.Client):
             async with aiohttp.ClientSession() as session:
                 # Get active markets
                 markets = await self.get_active_markets(session)
-                print(f'📊 Found {len(markets)} markets')
+                print(f'📊 Analysing {len(markets)} marchés actifs...')
+                
+                # Limiter le nombre de marchés si configuré
+                markets_to_scan = markets
+                if self.MAX_MARKETS_TO_ANALYZE:
+                    markets_to_scan = markets[:self.MAX_MARKETS_TO_ANALYZE]
+                    print(f'⚙️  Limite: analyse des {self.MAX_MARKETS_TO_ANALYZE} premiers marchés')
                 
                 alerts_found = 0
-                for market in markets[:50]:  # Monitor top 50 markets
+                for i, market in enumerate(markets_to_scan):  # Analyser TOUS les marchés
                     market_id = market.get('condition_id')
                     if not market_id:
                         continue
+                    
+                    # Afficher progression tous les 100 marchés
+                    if (i + 1) % 100 == 0:
+                        print(f'   ⏳ Progression: {i + 1}/{len(markets)} marchés analysés...')
                     
                     # Get recent trades for this market
                     trades = await self.get_recent_trades(session, market_id)
@@ -160,23 +171,45 @@ class PolymarketInsiderBot(discord.Client):
             print(f'❌ Erreur dans check_insider_activity: {e}')
     
     async def get_active_markets(self, session: aiohttp.ClientSession) -> List[dict]:
-        """Fetch active markets from Polymarket"""
+        """Fetch ALL active markets from Polymarket using pagination"""
+        all_markets = []
+        offset = 0
+        limit = 100
+        
         try:
-            url = f"{self.polymarket_api}/markets"
-            params = {
-                'closed': 'false',
-                'limit': 100,
-                '_sort': 'volume24hr',
-                '_order': 'desc'
-            }
+            while True:
+                url = f"{self.polymarket_api}/markets"
+                params = {
+                    'closed': 'false',
+                    'limit': limit,
+                    'offset': offset,
+                    '_sort': 'volume24hr',
+                    '_order': 'desc'
+                }
+                
+                async with session.get(url, params=params) as resp:
+                    if resp.status == 200:
+                        markets = await resp.json()
+                        if not markets:  # Plus de marchés à récupérer
+                            break
+                        all_markets.extend(markets)
+                        offset += limit
+                        
+                        # Limite de sécurité: max 1000 marchés (évite boucle infinie)
+                        if len(all_markets) >= 1000:
+                            break
+                    else:
+                        break
+                
+                # Petit délai pour ne pas surcharger l'API
+                await asyncio.sleep(0.5)
             
-            async with session.get(url, params=params) as resp:
-                if resp.status == 200:
-                    return await resp.json()
-                return []
+            print(f'📊 Total marchés récupérés: {len(all_markets)}')
+            return all_markets
+            
         except Exception as e:
             print(f'Erreur get_active_markets: {e}')
-            return []
+            return all_markets if all_markets else []
     
     async def get_recent_trades(self, session: aiohttp.ClientSession, market_id: str) -> List[dict]:
         """Get recent trades for a specific market"""
