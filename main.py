@@ -1,328 +1,335 @@
 import discord
-from discord.ext import tasks
+from discord.ext import commands, tasks
 import aiohttp
-import asyncio
-from datetime import datetime, timedelta
-import os
 import json
-import logging
+from datetime import datetime, timedelta
+from typing import Optional, Dict, List
+import asyncio
 
-# Configuration logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Configuration
+DISCORD_TOKEN = "YOUR_DISCORD_BOT_TOKEN"
+CHANNEL_ID = YOUR_CHANNEL_ID  # Channel où envoyer les alertes
+DATA_API = "https://data-api.polymarket.com"
+POLYMARKET_ANALYTICS_API = "https://polymarketanalytics.com/api"
 
-class PolymarketInsiderBot(discord.Client):
-    def __init__(self):
-        intents = discord.Intents.default()
-        intents.message_content = True
-        super().__init__(intents=intents)
-        
-        # Configuration
-        self.channel_id = int(os.getenv("DISCORD_CHANNEL_ID", "0"))
-        self.data_api = "https://data-api.polymarket.com"
-        self.gamma_api = "https://gamma-api.polymarket.com"
-        
-        # Seuils de détection d'insiders
-        self.MIN_BET_SIZE = 100  # $100 minimum pour tester
-        self.MIN_PROBABILITY = 10  # 10% minimum
-        self.NEW_WALLET_DAYS = 7  # Nouveau si créé dans les 7 jours
-        self.MAX_MARKETS = 50  # Top 50 marchés pour commencer
-        
-        # Tracking
-        self.checked_wallets = set()  # Éviter doublons
-        self.last_check = None
+# Scoring thresholds
+MIN_ALERT_SCORE = 65  # Minimum score pour envoyer une alerte
+WHALE_TRADE_SIZE = 5000  # $5K minimum
+MEGA_WHALE = 10000  # $10K
+GIGANTIC_WHALE = 50000  # $50K
 
-    async def on_ready(self):
-        print(f'✅ Bot connecté en tant que {self.user}')
-        print(f'📊 Surveillance des insiders Polymarket activée')
+class PolymarketInsiderBot(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
+        self.session: Optional[aiohttp.ClientSession] = None
+        self.markets_cache = {}
+        self.wallet_stats_cache = {}
         
-        # Envoyer alerte de démarrage
-        await self.send_startup_alert()
+    async def cog_load(self):
+        self.session = aiohttp.ClientSession()
+        self.check_insider_activity.start()
         
-        # Démarrer la boucle de surveillance
-        if not self.check_insider_activity.is_running():
-            self.check_insider_activity.start()
+    async def cog_unload(self):
+        self.check_insider_activity.cancel()
+        if self.session:
+            await self.session.close()
 
-    async def send_startup_alert(self):
-        """Envoie un message de confirmation au démarrage"""
-        channel = self.get_channel(self.channel_id)
-        if not channel:
-            print(f"❌ Channel {self.channel_id} non trouvé!")
-            return
+    # ============================================================
+    # FONCTIONS D'API
+    # ============================================================
+    
+    async def get_recent_trades(self, limit: int = 500) -> List[Dict]:
+        """Récupère les trades récents depuis l'API Polymarket"""
+        try:
+            async with self.session.get(
+                f"{DATA_API}/trades",
+                params={"limit": limit},
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as resp:
+                if resp.status == 200:
+                    trades = await resp.json()
+                    return trades if isinstance(trades, list) else []
+                return []
+        except Exception as e:
+            print(f"❌ Erreur API trades: {e}")
+            return []
+
+    async def get_wallet_stats(self, wallet: str) -> Dict:
+        """Récupère les stats d'un wallet (nombre de trades, P&L, win rate)"""
+        try:
+            # Cherche le wallet dans les stats publiques
+            async with self.session.get(
+                f"{DATA_API}/activity",
+                params={"proxyWallet": wallet, "limit": 1000},
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as resp:
+                if resp.status == 200:
+                    trades = await resp.json()
+                    if isinstance(trades, list) and len(trades) > 0:
+                        return self._calculate_wallet_stats(trades, wallet)
+            
+            # Fallback: Retourne des stats basiques
+            return {
+                "num_trades": 0,
+                "pnl": 0,
+                "win_rate": 0,
+                "markets_traded": 0,
+                "total_volume": 0
+            }
+        except Exception as e:
+            print(f"❌ Erreur stats wallet {wallet}: {e}")
+            return {
+                "num_trades": 0,
+                "pnl": 0,
+                "win_rate": 0,
+                "markets_traded": 0,
+                "total_volume": 0
+            }
+
+    async def get_market_info(self, condition_id: str) -> Dict:
+        """Récupère les infos d'un marché"""
+        try:
+            async with self.session.get(
+                f"{DATA_API}/markets",
+                params={"condition_id": condition_id},
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as resp:
+                if resp.status == 200:
+                    markets = await resp.json()
+                    return markets[0] if markets else {}
+            return {}
+        except Exception as e:
+            print(f"❌ Erreur info marché: {e}")
+            return {}
+
+    def _calculate_wallet_stats(self, trades: List[Dict], wallet: str) -> Dict:
+        """Calcule les stats d'un wallet à partir de ses trades"""
+        if not trades:
+            return {
+                "num_trades": 0,
+                "pnl": 0,
+                "win_rate": 0,
+                "markets_traded": 0,
+                "total_volume": 0
+            }
         
-        embed = discord.Embed(
-            title="🚀 Bot Démarré avec Succès",
-            description="Le Guetteur est maintenant opérationnel",
-            color=0x00FF00,
-            timestamp=datetime.now()
-        )
+        num_trades = len(trades)
+        winning_trades = len([t for t in trades if t.get("pnl", 0) > 0])
+        total_volume = sum(float(t.get("size", 0)) * float(t.get("price", 0)) for t in trades)
+        total_pnl = sum(float(t.get("pnl", 0)) for t in trades)
+        markets = len(set(t.get("conditionId") for t in trades if t.get("conditionId")))
+        win_rate = (winning_trades / num_trades * 100) if num_trades > 0 else 0
         
-        embed.add_field(name="⏰ Fréquence", value="Check toutes les 60 secondes", inline=False)
-        embed.add_field(name="💰 Seuil Minimum", value=f"${self.MIN_BET_SIZE}", inline=True)
-        embed.add_field(name="📊 Probabilité Min", value=f"{self.MIN_PROBABILITY}%", inline=True)
-        embed.add_field(name="🎯 Marchés", value=f"Top {self.MAX_MARKETS} analysés", inline=True)
+        return {
+            "num_trades": num_trades,
+            "pnl": total_pnl,
+            "win_rate": round(win_rate, 1),
+            "markets_traded": markets,
+            "total_volume": round(total_volume, 2)
+        }
+
+    # ============================================================
+    # SCORING D'INSIDERS
+    # ============================================================
+    
+    async def calculate_insider_score(self, trade: Dict, wallet_stats: Dict) -> tuple[int, List[str]]:
+        """Calcule le score d'insider basé sur critères réalistes"""
+        score = 0
+        signals = []
         
         try:
-            await channel.send("🔍 **Recherche des insiders en cours...**", embed=embed)
-            print("✅ Alerte de démarrage envoyée")
+            trade_size = float(trade.get("size", 0)) * float(trade.get("price", 0))
+            num_trades = wallet_stats.get("num_trades", 0)
+            win_rate = wallet_stats.get("win_rate", 0)
+            
+            # 1. TAILLE DU TRADE
+            if trade_size >= GIGANTIC_WHALE:  # $50K+
+                score += 30
+                signals.append(f"💰 Grosse mise: ${trade_size:,.0f}")
+            elif trade_size >= MEGA_WHALE:  # $10K+
+                score += 20
+                signals.append(f"💰 Mise importante: ${trade_size:,.0f}")
+            elif trade_size >= WHALE_TRADE_SIZE:  # $5K+
+                score += 10
+                signals.append(f"💰 Mise: ${trade_size:,.0f}")
+            
+            # 2. NOMBRE DE TRADES (insider = peu de trades = nouveau compte)
+            if num_trades == 0:
+                score += 25
+                signals.append("🆕 Wallet neuf (0 trades)")
+            elif num_trades == 1:
+                score += 20
+                signals.append("🆕 Compte quasi-neuf (1 trade)")
+            elif num_trades <= 3:
+                score += 10
+                signals.append(f"⚠️ Compte peu actif ({num_trades} trades)")
+            elif num_trades > 50:
+                score -= 10  # Whale établi, moins suspect
+                signals.append(f"👤 Trader établi ({num_trades} trades)")
+            
+            # 3. WIN RATE
+            if win_rate >= 80 and num_trades >= 5:
+                score += 15
+                signals.append(f"🎯 Win rate excellent: {win_rate}%")
+            elif win_rate >= 60 and num_trades >= 10:
+                score += 10
+                signals.append(f"📊 Win rate bon: {win_rate}%")
+            elif win_rate <= 30 and num_trades >= 5:
+                score -= 5  # Losing trader, moins crédible
+                signals.append(f"❌ Win rate faible: {win_rate}%")
+            
+            # 4. TIMING (heures bizarres = 23h-6h)
+            hour = datetime.utcnow().hour
+            if 23 <= hour or hour <= 6:
+                if trade_size >= WHALE_TRADE_SIZE:
+                    score += 10
+                    signals.append("⏰ Trade à heures bizarres")
+            
+            # 5. PREMIÈRE POSITION UNIQUE (si c'est son premier trade sur ce marché)
+            if num_trades <= 2 and trade_size >= WHALE_TRADE_SIZE:
+                score += 15
+                signals.append("🎯 Concentration: trade unique sur ce marché")
+            
+        except Exception as e:
+            print(f"⚠️ Erreur scoring: {e}")
+        
+        return max(0, min(100, score)), signals  # Score entre 0-100
+
+    # ============================================================
+    # DÉTECTION ET ALERTES
+    # ============================================================
+    
+    @tasks.loop(minutes=1)
+    async def check_insider_activity(self):
+        """Scanne les trades toutes les minutes"""
+        print(f"🔍 [{datetime.utcnow().strftime('%H:%M:%S')}] SCAN POLYMARKET - Recherche d'insiders...")
+        
+        # Récupère les trades récents
+        trades = await self.get_recent_trades(limit=200)
+        if not trades:
+            print("❌ Aucun trade trouvé")
+            return
+        
+        alerts_sent = 0
+        
+        for trade in trades[:50]:  # Analyse les 50 premiers
+            try:
+                wallet = trade.get("proxyWallet", "unknown")
+                trade_size = float(trade.get("size", 0)) * float(trade.get("price", 0))
+                
+                # Skip les petits trades
+                if trade_size < WHALE_TRADE_SIZE:
+                    continue
+                
+                # Récupère les stats du wallet
+                wallet_stats = await self.get_wallet_stats(wallet)
+                
+                # Calcule le score d'insider
+                score, signals = await self.calculate_insider_score(trade, wallet_stats)
+                
+                # Si score >= seuil, envoie une alerte
+                if score >= MIN_ALERT_SCORE:
+                    await self.send_alert(trade, wallet_stats, score, signals)
+                    alerts_sent += 1
+                    await asyncio.sleep(2)  # Rate limiting
+                    
+            except Exception as e:
+                print(f"⚠️ Erreur traitement trade: {e}")
+                continue
+        
+        print(f"✅ SCAN TERMINÉ - {alerts_sent} alerte(s) envoyée(s)")
+
+    async def send_alert(self, trade: Dict, wallet_stats: Dict, score: int, signals: List[str]):
+        """Envoie une alerte Discord"""
+        try:
+            channel = self.bot.get_channel(CHANNEL_ID)
+            if not channel:
+                return
+            
+            # Prépare les données
+            wallet = trade.get("proxyWallet", "unknown")[:6] + "..."
+            market_name = trade.get("title", "Marché inconnu")
+            outcome = trade.get("outcome", "?")
+            price = float(trade.get("price", 0))
+            size = float(trade.get("size", 0))
+            trade_value = size * price
+            market_url = f"https://polymarket.com/market/{trade.get('slug', '')}" if trade.get('slug') else "https://polymarket.com"
+            
+            # Score color
+            if score >= 90:
+                color = discord.Color.red()  # 🔴 RED - Insider PROBABLE
+                emoji = "🚨"
+            elif score >= 75:
+                color = discord.Color.orange()  # 🟠 ORANGE - Suspect
+                emoji = "⚠️"
+            else:
+                color = discord.Color.yellow()  # 🟡 YELLOW - À surveiller
+                emoji = "👀"
+            
+            # Crée l'embed
+            embed = discord.Embed(
+                title=f"{emoji} INSIDER DÉTECTÉ (Score: {score}%)",
+                description=f"**{market_name}**\n→ {outcome}",
+                color=color,
+                url=market_url,
+                timestamp=datetime.utcnow()
+            )
+            
+            # Infos du trade
+            embed.add_field(
+                name="💰 Trade Info",
+                value=f"Size: {size:.0f} @ ${price:.4f}\nValeur: **${trade_value:,.2f}**",
+                inline=True
+            )
+            
+            # Stats du wallet
+            embed.add_field(
+                name="👤 Wallet Stats",
+                value=(
+                    f"Trades: **{wallet_stats['num_trades']}**\n"
+                    f"P&L: **${wallet_stats['pnl']:,.2f}**\n"
+                    f"Win Rate: **{wallet_stats['win_rate']}%**"
+                ),
+                inline=True
+            )
+            
+            # Signaux détectés
+            if signals:
+                embed.add_field(
+                    name="🔍 Signaux",
+                    value="\n".join(signals),
+                    inline=False
+                )
+            
+            # Adresse wallet
+            embed.add_field(
+                name="🔗 Wallet",
+                value=f"`{trade.get('proxyWallet', 'unknown')}`",
+                inline=False
+            )
+            
+            embed.set_footer(text=f"Analyser sur PolymarketAnalytics | {datetime.utcnow().strftime('%H:%M:%S UTC')}")
+            
+            await channel.send(embed=embed)
+            print(f"✅ Alerte envoyée: {market_name} (Score: {score}%)")
+            
         except Exception as e:
             print(f"❌ Erreur envoi alerte: {e}")
 
-    @tasks.loop(seconds=60)
-    async def check_insider_activity(self):
-        """Vérifie les activités d'insiders toutes les 60 secondes"""
-        try:
-            print(f"\n{'='*60}")
-            print(f"🔍 [{datetime.now().strftime('%H:%M:%S')}] DÉBUT DU SCAN POLYMARKET")
-            print(f"{'='*60}")
-            
-            async with aiohttp.ClientSession() as session:
-                # Récupérer les marchés actifs
-                print("📊 Récupération des marchés...")
-                markets = await self.get_active_markets(session)
-                
-                if not markets:
-                    print("❌ Aucun marché récupéré!")
-                    print(f"{'='*60}\n")
-                    return
-                
-                print(f"✅ {len(markets)} marchés trouvés")
-                
-                # Limiter à MAX_MARKETS
-                markets_to_check = markets[:self.MAX_MARKETS]
-                print(f"📊 Analyse des {len(markets_to_check)} premiers marchés...\n")
-                
-                total_trades = 0
-                alerts_sent = 0
-                
-                # Analyser chaque marché
-                for idx, market in enumerate(markets_to_check, 1):
-                    try:
-                        condition_id = market.get('conditionId')
-                        if not condition_id:
-                            continue
-                        
-                        # Récupérer les trades pour ce marché
-                        trades = await self.get_market_trades(session, condition_id)
-                        
-                        if not trades:
-                            continue
-                        
-                        total_trades += len(trades)
-                        
-                        # Analyser les trades
-                        for trade in trades:
-                            is_insider, score = await self.analyze_trade(trade, session)
-                            
-                            if is_insider and score >= self.MIN_PROBABILITY:
-                                alerts_sent += 1
-                                await self.send_insider_alert(
-                                    trade, market, score, session
-                                )
-                        
-                        # Afficher progression tous les 10 marchés
-                        if idx % 10 == 0:
-                            print(f"   ⏳ Progression: {idx}/{len(markets_to_check)} | {total_trades} trades | {alerts_sent} alertes")
-                    
-                    except Exception as e:
-                        logger.error(f"Erreur marché {market.get('title', 'Unknown')}: {e}")
-                        continue
-                
-                print(f"\n{'='*60}")
-                print(f"✅ SCAN TERMINÉ")
-                print(f"   📊 Marchés: {len(markets_to_check)}")
-                print(f"   💰 Trades: {total_trades}")
-                print(f"   🚨 Alertes: {alerts_sent}")
-                print(f"{'='*60}\n")
-        
-        except Exception as e:
-            logger.error(f"Erreur check_insider_activity: {e}")
-            print(f"❌ Erreur: {e}")
-            print(f"{'='*60}\n")
+# ============================================================
+# INITIALISATION BOT
+# ============================================================
 
-    async def get_active_markets(self, session):
-        """Récupère les marchés actifs de Polymarket"""
-        try:
-            url = f"{self.gamma_api}/markets"
-            params = {
-                'limit': 100,
-                'closed': 'false'
-            }
-            
-            async with session.get(url, params=params, timeout=10) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    return data.get('data', []) if isinstance(data, dict) else data
-                else:
-                    print(f"❌ Erreur API marchés: {resp.status}")
-                    return []
-        
-        except Exception as e:
-            logger.error(f"Erreur get_active_markets: {e}")
-            return []
+class MyBot(commands.Bot):
+    async def on_ready(self):
+        print(f"✅ Bot connecté: {self.user}")
+        await self.add_cog(PolymarketInsiderBot(self))
 
-    async def get_market_trades(self, session, condition_id):
-        """Récupère les trades d'un marché spécifique"""
-        try:
-            url = f"{self.data_api}/trades"
-            params = {
-                'market': condition_id,
-                'limit': 100,
-                'order_by': 'timestamp'
-            }
-            
-            async with session.get(url, params=params, timeout=10) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    return data.get('data', []) if isinstance(data, dict) else data
-                else:
-                    return []
-        
-        except Exception as e:
-            logger.error(f"Erreur get_market_trades ({condition_id}): {e}")
-            return []
+bot = MyBot(command_prefix="!", intents=discord.Intents.default())
 
-    async def analyze_trade(self, trade, session):
-        """Analyse un trade pour détecter les caractéristiques d'insider"""
-        score = 0
-        
-        try:
-            # Extraire données
-            wallet = trade.get('proxyWallet', '')
-            size = float(trade.get('size', 0))
-            price = float(trade.get('price', 0))
-            timestamp = trade.get('timestamp')
-            
-            # Vérifier les critères
-            
-            # 1. Taille du pari (max 40 pts)
-            if size >= self.MIN_BET_SIZE:
-                score += min(40, int((size / self.MIN_BET_SIZE) * 20))
-            
-            # 2. Wallet nouveau (max 30 pts)
-            if wallet and wallet not in self.checked_wallets:
-                score += 30
-                self.checked_wallets.add(wallet)
-            
-            # 3. Price extrême (très haut ou très bas = suspect)
-            if price > 0.8 or price < 0.2:
-                score += 20
-            
-            # 4. Trading à heures bizarres
-            if timestamp:
-                try:
-                    trade_time = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
-                    hour = trade_time.hour
-                    if hour < 6 or hour > 22:  # Entre minuit et 6h ou après 22h
-                        score += 10
-                except:
-                    pass
-            
-            is_insider = score >= self.MIN_PROBABILITY
-            return is_insider, min(100, score)
-        
-        except Exception as e:
-            logger.error(f"Erreur analyze_trade: {e}")
-            return False, 0
-
-    async def send_insider_alert(self, trade, market, score, session):
-        """Envoie une alerte Discord"""
-        channel = self.get_channel(self.channel_id)
-        if not channel:
-            return
-        
-        try:
-            # Extraire données
-            wallet = trade.get('proxyWallet', 'Unknown')[:10]
-            side = trade.get('side', 'UNKNOWN')
-            size = float(trade.get('size', 0))
-            price = float(trade.get('price', 0))
-            outcome = trade.get('outcome', 'Unknown')
-            market_title = market.get('title', 'Unknown Market')
-            condition_id = market.get('conditionId', '')
-            
-            # Déterminer l'action
-            action = "ACHETER" if side == "BUY" else "VENDRE"
-            action_emoji = "✅" if side == "BUY" else "❌"
-            
-            # Couleur selon probabilité
-            if score >= 80:
-                color = 0xFF0000  # Rouge
-                prob_text = "🔥 TRÈS ÉLEVÉE"
-            elif score >= 65:
-                color = 0xFF6600  # Orange
-                prob_text = "📈 ÉLEVÉE"
-            elif score >= 50:
-                color = 0xFFCC00  # Jaune
-                prob_text = "⚠️ MOYENNE"
-            else:
-                color = 0x0099FF  # Bleu
-                prob_text = "💡 FAIBLE"
-            
-            # Créer l'embed
-            embed = discord.Embed(
-                title="🚨 ALERTE INSIDER DÉTECTÉ",
-                description=market_title,
-                color=color,
-                timestamp=datetime.now()
-            )
-            
-            embed.add_field(
-                name="✅ ACTION À SUIVRE",
-                value=f"{action_emoji} {action} {outcome}",
-                inline=False
-            )
-            
-            embed.add_field(
-                name="🎲 Probabilité Insider",
-                value=f"{score}%\n{prob_text}",
-                inline=False
-            )
-            
-            embed.add_field(
-                name="💡 Détails du Trade",
-                value=f"Type: {side}\nOutcome: {outcome}",
-                inline=False
-            )
-            
-            embed.add_field(
-                name="💰 Taille",
-                value=f"${size:,.2f}",
-                inline=True
-            )
-            
-            embed.add_field(
-                name="💵 Prix/Share",
-                value=f"${price:.3f}",
-                inline=True
-            )
-            
-            embed.add_field(
-                name="👤 Wallet",
-                value=f"`{wallet}...`",
-                inline=True
-            )
-            
-            embed.add_field(
-                name="🔗 Lien Marché",
-                value=f"https://polymarket.com/market/{market.get('slug', '')}",
-                inline=False
-            )
-            
-            await channel.send(embed=embed)
-            print(f"🚨 ALERTE ENVOYÉE: {market_title[:50]} (Score: {score}%)")
-        
-        except Exception as e:
-            logger.error(f"Erreur send_insider_alert: {e}")
-
-def main():
-    token = os.getenv("DISCORD_BOT_TOKEN")
-    if not token:
-        print("❌ DISCORD_BOT_TOKEN non défini!")
-        return
-    
-    bot = PolymarketInsiderBot()
-    bot.run(token)
+@bot.event
+async def on_ready():
+    print(f"✅ {bot.user} connecté et prêt!")
 
 if __name__ == "__main__":
-    main()
+    bot.run(DISCORD_TOKEN)
